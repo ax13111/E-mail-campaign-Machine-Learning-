@@ -1,0 +1,185 @@
+---
+title: "E-mail Campaign"
+output: html_document
+date: "2022-11-09"
+author: "Joseph Sun"
+---
+__Objective:__
+Universal Plus would like to implement a __direct marketing system__ to identify their target group for the marketing campaign. With this system, they want to __predict which customers will visit the shop__ as a result of a direct e-mail campaign. This way, they can target the right customers.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Pre Work
+```{r}
+#install necessary packages
+#install.packages("caTools")
+#install.packages("caret")
+#install.packages("pROC")
+#install.packages("CustomerScoringMetrics")
+#install.packages("e1071")
+#install.packages("randomForest")
+#install.packages("FSelector")
+#install.packages("tidyverse")
+#install.packages("ROSE")
+library(tidyverse)
+# Load caTools package for data partitioning
+library(caTools)
+# load Caret package for computing Confusion matrix
+library(caret)
+# load pROC package for ROC chart
+library(pROC)
+# load the CustomerScoringMetrics package for gain chart
+library(CustomerScoringMetrics)
+# Packages for SVM and Random Forest
+library(e1071)
+library(randomForest)
+library(FSelector)
+library(ROSE)
+library(tree)
+```
+# Data Loading and Cleaning
+## check factors
+```{r}
+#Load the data and transfer strings to factor:
+data<-read.csv("assignment_data.csv", stringsAsFactors = TRUE)
+#check the structure of the data:
+str(data)
+#convert our target into factor:
+data$visit<-as.factor(data$visit)
+```
+
+##data visualizing
+```{r}
+ggplot(data,aes(recency))+geom_histogram(fill="pink",color="black")
+ggplot(data,aes(purchase_segment))+geom_bar(fill="skyblue",color="black")+facet_wrap(zip_area~.)+ theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+ggplot(data,aes(age))+geom_histogram(fill="red",color="black")
+```
+
+
+##data cleaning
+```{r}
+#check all levels of factors in the data:
+for(i in colnames(data)){print(levels(data[,i]))}
+#Remove customerID since it has nothing to do with our model.
+data$Customer_ID<-NULL
+#Since the "spend" column is the consequence of "visit"(our objective), so it should be deleted from the model:
+data$spend<-NULL
+data$purchase_segment<-NULL
+#check the NAs in each column of the data:
+for(i in colnames(data)){print(table(is.na(data[,i])))}
+#only "purchase segment" has 26 NAs, let's filter them out:
+data<-na.omit(data)
+```
+
+#Modeling Part
+
+##infromation gain, select useful variables
+```{r}
+#Find important/imformative variables:
+weights<-information.gain(visit~., data)
+print(weights)
+```
+
+```{r}
+#plot the importance of columns:
+weights$attr<-rownames(weights)
+weights<-arrange(weights,-weights$attr_importance)
+barplot(weights$attr_importance, names = weights$attr, las = 2, ylim = c(0, 0.06))
+```
+
+##split the data
+
+```{r}
+#try apply 9 variables:
+variables_9<-cutoff.k(weights,8)
+data_9<-data[variables_9]
+#add target variable to our data_10:
+data_9$visit<-data$visit
+
+#split data into training and testing sets:
+#set seed use 123
+set.seed(123)
+split<-sample.split(data_9$visit,SplitRatio = 0.8)
+training<-subset(data_9,split==TRUE)
+testing<-subset(data_9,split==FALSE)
+table(training$visit)
+table(testing$visit)
+```
+
+## oversample and undersample
+```{r}
+#do oversample and undersample to our training data and set the ratio to 0.2
+ovundata_9 <- ovun.sample(visit~., data = training, method = "over", p=0.4, seed=1)$data
+#plot the ovundata_10 to see the result:
+ggplot(ovundata_9,aes(visit))+geom_bar(fill="skyblue",color="darkblue")+labs(x="Not Visit VS Visit",y="Numbers of observation", title="Over&Under sample Plot")
+```
+##SVM model
+```{r}
+#Let's train our model:(SVM)
+#In this case we use "Radial Basis Function" since it is usually chosen for non-linear data. It helps to make proper separation when there is no prior knowledge of data.
+SVM<- svm(visit~. , data = ovundata_9, kernel = "radial", scale = TRUE, probability=TRUE)
+```
+
+```{r}
+#Predict the result
+SVM_predict<-predict(SVM, testing)
+#Make a confusion matrix and see what we got.
+confusionMatrix(SVM_predict, testing$visit, positive='1', mode = "prec_recall")
+#The accuracy rate is good. However, the recall are so poor(46.05%). Which means our model is picky and don't think much of customer will visit. We got almost every customer that will visit however, we lose some potential customer that will visit.
+```
+##Logistic model
+```{r}
+#TRY logistic regression:
+LOGISTIC <- glm(visit~. , data = ovundata_9, family = "binomial")
+LOGISTIC_pred<-predict(LOGISTIC, testing)
+LOGREG_class <- ifelse(LOGISTIC_pred > 0.4, "1", "0")
+# Save the predictions as factor variables
+LOGREG_class<-as.factor(LOGREG_class)
+confusionMatrix(LOGREG_class, testing$visit, positive='1', mode = "prec_recall")
+
+```
+##Decision tree model
+```{r}
+#Decision tree:
+Dtree <- tree(visit~., data =  ovundata_9, control = tree.control(nrow(ovundata_9), mindev=0.0001))
+# Check the summary of the tree
+summary(Dtree)
+# Predict the Test set results 
+Dtree_pred <- predict(Dtree, testing, type="class",probability=T)
+# Confusion matrix
+confusionMatrix(Dtree_pred, testing$visit, positive='1', mode = "prec_recall")
+```
+##Random Forest model
+```{r}
+set.seed(123)
+RFM<-randomForest(visit~.,ovundata_9,ntree=50,mtry=2)
+RFM_pred<-predict(RFM,testing)
+confusionMatrix(RFM_pred,testing$visit,positive="1",mode="prec_recall")
+#The result was satisfying! Accuracy is 92%, precision 77%, recall 74%.
+```
+
+##ROC&AUC
+```{r}
+#ROC PLOT
+SVM_pred <- predict(SVM, testing, probability = TRUE)
+SVM_prob <- attr(SVM_pred, "probabilities")
+RFM_prob <- predict(RFM, testing, type = "prob")
+
+ROC_SVM <- roc(testing$visit, SVM_prob[,2])
+ROC_RF <- roc(testing$visit, RFM_prob[,2])
+ROC_LOG<-roc(testing$visit, LOGISTIC_pred)
+```
+
+```{r}
+#Plot and calculate the AUC of each model:
+ggroc(list(Logistic = ROC_LOG, SVM = ROC_SVM, RF = ROC_RF), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+
+AUC_result=data.frame(Model=c("Logistic","SVM","RandomForest"),AUC=c(auc(ROC_LOG),auc(ROC_SVM),auc(ROC_RF)))
+AUC_result
+```
+
+
+
+
